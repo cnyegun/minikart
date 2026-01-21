@@ -29,16 +29,30 @@ typedef enum {
     STATE_DONE,
 } state_t;
 
+typedef enum {
+    TYPE_NULL,
+    TYPE_STRING,
+    TYPE_ERROR,
+    TYPE_INT,
+} type_t;
+
 typedef struct {
+
     int client_fd;
     state_t state;
+    type_t type;
 
     char request[REQUEST_BUFF_LEN];
-    size_t request_len;
+    ssize_t request_len;
+    ssize_t req_offset;
+    ssize_t total_element;
+    ssize_t read_element;
+    ssize_t parse_index;
 
     char response[RESPONSE_BUFF_LEN];
-    size_t response_len;
-    size_t response_sent;
+    ssize_t response_len;
+    ssize_t res_offset;
+
 } client_t;
 
 int setup_server_socket();
@@ -151,6 +165,7 @@ int init_epoll(int server_fd) {
 }
 
 void handle_new_connection(int epoll_fd, int server_fd) {
+    printf("You got a new connection!\n");
     struct sockaddr_in client_addr;
     socklen_t socklen = sizeof(client_addr);
 
@@ -194,6 +209,118 @@ void handle_new_connection(int epoll_fd, int server_fd) {
     }
 }
 
+void free_client(client_t *client) {
+    if (!client) return;
+
+    if (client->client_fd > 0)
+        close(client->client_fd);
+    free(client);
+}
+
+void handle_state_read(int epoll_fd, client_t *client) {
+    if (REQUEST_BUFF_LEN - client->req_offset < 2) {
+        printf("Buffer full!\n");
+        free_client(client);
+        return;
+    }
+    ssize_t bytes_read = read(
+        client->client_fd,
+        client->request + client->req_offset,
+        REQUEST_BUFF_LEN - client->req_offset - 1
+    );
+
+    if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        perror("Read request failed");
+        free_client(client);
+        return;
+    }
+
+    if (bytes_read == 0) {
+        // The client want to close connection
+        free_client(client);
+        return;
+    }
+
+    assert(bytes_read > 0);
+    client->req_offset += bytes_read;
+    client->request[client->req_offset] = '\0';
+
+    // I need to parse how many element
+    // (will) be in the request
+    if (client->request[0] != '*') {
+        printf("Strange prefix '%c', ignore...\n", client->request[0]);
+        free_client(client);
+        return;
+    }
+
+    // If num_element is not known yet
+    if (client->total_element == 0) {
+        char *location = strstr(client->request, "\r\n");
+        if (location) {
+            // We got at least the number of elements
+            // Parse it
+            sscanf(client->request, "*%ld\r\n", &(client->total_element));
+            client->parse_index = (location - client->request) + 2;
+        } else {
+            // Can't parse the total element now, wait more
+            return;
+        }
+    }
+
+    // Okay we have num element at this point
+    // Lets try to read it to see if we got a new elementon this package
+    while (client->read_element < client->total_element) {
+        if (client->parse_index >= client->req_offset) return;
+        if (client->request[client->parse_index] != '$') {
+            printf("Trying to parse a string with $ but found %c\n", client->request[client->parse_index]);
+            free_client(client);
+            return;
+        }
+
+        char *location = strstr(client->request + client->parse_index, "\r\n");
+        if (!location) {
+            // There is no \r\n, stop. 
+            return;
+        }
+
+        // Parse the length of the element
+        int len_next_elem;
+        sscanf(client->request + client->parse_index, "$%d\r\n", &len_next_elem);
+        ssize_t skip = (location - (client->request + client->parse_index)) + 2 + len_next_elem + 2;
+
+        // And then jump
+        if (client->parse_index + skip > client->req_offset) {
+            // Out of bound
+            return;
+        }
+        else {
+            client->parse_index += skip;
+            client->read_element++;
+        }
+
+    }
+
+    if (client->read_element == client->total_element) {
+        // Done and verified reading the whole request
+        client->state = STATE_SEND;
+        client->request_len = client->req_offset;
+
+        // Change to write mode
+        struct epoll_event ev;
+        ev.events = EPOLLOUT;
+        ev.data.ptr = client;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
+            perror("Epoll_ctl failed");
+            free_client(client);
+            return;
+        }
+
+        printf("Sucessfully received the message:\n%s", client->request);
+        printf("INFO: total_element: %ld\n", client->total_element);
+    }
+}
+
+
 void handle_client_event(int epoll_fd, client_t *client) {
     if (!client) return;
     (void)epoll_fd;
@@ -201,6 +328,7 @@ void handle_client_event(int epoll_fd, client_t *client) {
     switch (client->state) {
 
         case STATE_READ:
+            handle_state_read(epoll_fd, client);
             break;
         case STATE_SEND:
             break;
