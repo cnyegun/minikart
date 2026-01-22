@@ -225,6 +225,7 @@ void handle_state_read(int epoll_fd, client_t *client) {
         free_client(client);
         return;
     }
+
     ssize_t bytes_read = read(
         client->client_fd,
         client->request + client->req_offset,
@@ -296,10 +297,9 @@ void handle_state_read(int epoll_fd, client_t *client) {
             return;
         }
         else {
-            client->argv[client->read_element] = client->request + client->parse_index + 2;
-            char buf[64];
-            sscanf(client->argv[client->read_element], "%s\r", buf);
-            printf("argv[%ld]: %s\n", client->read_element, buf);
+            client->argv[client->read_element] = location + 2;
+            *(location + 2 + len_next_elem) = '\0';
+            printf("argv[%ld]: %s\n", client->read_element, client->argv[client->read_element]);
             client->parse_index += skip;
             client->read_element++;
         }
