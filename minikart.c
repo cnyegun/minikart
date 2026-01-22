@@ -1,7 +1,9 @@
+#include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -219,6 +221,62 @@ void free_client(client_t *client) {
     free(client);
 }
 
+void process_command(client_t *client) {
+    if (!client || client->total_element == 0) return;
+
+    if (strcasecmp(client->argv[0], "PING") == 0) {
+        const char *reply = "+PONG\r\n";
+        size_t len = strlen(reply);
+        memcpy(client->response, reply, len);
+        client->response_len = len; 
+        return;
+    }
+
+    // Default: Unknown Command
+    const char *err = "-ERR unknown command\r\n";
+    memcpy(client->response, err, strlen(err));
+    client->response_len = strlen(err);
+}
+
+void cleanup_connection(client_t *client) {
+    client->parse_index = 0;
+    client->read_element = 0;
+    client->response_len = 0;
+    client->total_element = 0;
+    client->req_offset = 0;
+    client->res_offset = 0;
+}
+
+void handle_state_send(int epoll_fd, client_t *client) {
+    ssize_t bytes_sent = write(
+        client->client_fd,
+        client->response + client->res_offset,
+        client->response_len - client->res_offset
+    );
+
+    if (bytes_sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        perror("Write response failed");
+        free_client(client);
+        return;
+    }
+
+    client->res_offset += bytes_sent;
+    
+    if (client->res_offset == client->response_len) {
+        cleanup_connection(client);
+        client->state = STATE_READ;
+        struct epoll_event ev;
+        ev.events = EPOLLIN;
+        ev.data.ptr = client;
+
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
+            perror("Epoll add back connection failed");
+            free_client(client);
+        }
+    }
+}
+
 void handle_state_read(int epoll_fd, client_t *client) {
     if (REQUEST_BUFF_LEN - client->req_offset < 2) {
         printf("Buffer full!\n");
@@ -308,6 +366,8 @@ void handle_state_read(int epoll_fd, client_t *client) {
 
     if (client->read_element == client->total_element) {
         // Done and verified reading the whole request
+        process_command(client);
+
         client->state = STATE_SEND;
         client->request_len = client->req_offset;
 
@@ -320,9 +380,9 @@ void handle_state_read(int epoll_fd, client_t *client) {
             free_client(client);
             return;
         }
-
-        printf("Sucessfully received the message:\n%s", client->request);
         printf("INFO: total_element: %ld\n", client->total_element);
+
+        handle_state_send(epoll_fd, client);
     }
 }
 
@@ -337,6 +397,7 @@ void handle_client_event(int epoll_fd, client_t *client) {
             handle_state_read(epoll_fd, client);
             break;
         case STATE_SEND:
+            handle_state_send(epoll_fd, client);
             break;
         case STATE_DONE:
             break;
