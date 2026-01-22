@@ -5,6 +5,9 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <assert.h>
+#include <string.h>
 
 #define MAX_PREFIX_LEN 10
 
