@@ -3,7 +3,10 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdbool.h>
+
+#define MAX_PREFIX_LEN 10
 
 typedef struct art_tree art_tree;
 
