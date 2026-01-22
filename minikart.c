@@ -49,6 +49,8 @@ typedef struct {
     ssize_t read_element;
     ssize_t parse_index;
 
+    char *argv[16];
+
     char response[RESPONSE_BUFF_LEN];
     ssize_t response_len;
     ssize_t res_offset;
@@ -294,6 +296,10 @@ void handle_state_read(int epoll_fd, client_t *client) {
             return;
         }
         else {
+            client->argv[client->read_element] = client->request + client->parse_index + 2;
+            char buf[64];
+            sscanf(client->argv[client->read_element], "%s\r", buf);
+            printf("argv[%ld]: %s\n", client->read_element, buf);
             client->parse_index += skip;
             client->read_element++;
         }
