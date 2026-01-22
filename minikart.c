@@ -32,6 +32,18 @@ typedef enum {
 } state_t;
 
 typedef enum {
+    IO_OK,
+    IO_AGAIN,
+    IO_ERR
+} io_status_t;
+
+typedef enum {
+    PARSE_OK,
+    PARSE_INCOMPLETE,
+    PARSE_ERR
+} parse_status_t;
+
+typedef enum {
     TYPE_NULL,
     TYPE_STRING,
     TYPE_ERROR,
@@ -277,11 +289,10 @@ void handle_state_send(int epoll_fd, client_t *client) {
     }
 }
 
-void handle_state_read(int epoll_fd, client_t *client) {
+io_status_t io_reader(client_t *client) {
     if (REQUEST_BUFF_LEN - client->req_offset < 2) {
         printf("Buffer full!\n");
-        free_client(client);
-        return;
+        return IO_ERR;
     }
 
     ssize_t bytes_read = read(
@@ -290,21 +301,33 @@ void handle_state_read(int epoll_fd, client_t *client) {
         REQUEST_BUFF_LEN - client->req_offset - 1
     );
 
-    if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+    if (bytes_read < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Try again
+            return IO_AGAIN;
+        }
         perror("Read request failed");
-        free_client(client);
-        return;
+        return IO_ERR;
     }
 
     if (bytes_read == 0) {
         // The client want to close connection
-        free_client(client);
-        return;
+        return IO_ERR;
     }
-
     assert(bytes_read > 0);
     client->req_offset += bytes_read;
     client->request[client->req_offset] = '\0';
+
+    return IO_OK;
+}
+
+void handle_state_read(int epoll_fd, client_t *client) {
+    io_status_t read_status = io_reader(client);
+    if (read_status == IO_ERR) {
+        free_client(client);
+        return;
+    }
+    else if (read_status == IO_AGAIN) return;
 
     // I need to parse how many element
     // (will) be in the request
@@ -381,8 +404,6 @@ void handle_state_read(int epoll_fd, client_t *client) {
             return;
         }
         printf("INFO: total_element: %ld\n", client->total_element);
-
-        handle_state_send(epoll_fd, client);
     }
 }
 
