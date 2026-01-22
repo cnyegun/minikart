@@ -1,6 +1,5 @@
 #include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -24,6 +23,8 @@
 #define MAX_EVENTS 128
 #define REQUEST_BUFF_LEN 4096
 #define RESPONSE_BUFF_LEN 4096
+#define MAX_ARGS 16
+#define CRLF_LEN 2
 
 typedef enum {
     STATE_READ,
@@ -63,7 +64,7 @@ typedef struct {
     ssize_t read_element;
     ssize_t parse_index;
 
-    char *argv[16];
+    char *argv[MAX_ARGS];
 
     char response[RESPONSE_BUFF_LEN];
     ssize_t response_len;
@@ -321,6 +322,69 @@ io_status_t io_reader(client_t *client) {
     return IO_OK;
 }
 
+parse_status_t parse_request(client_t *client) {
+    // I need to parse how many element
+    // (will) be in the request
+    if (client->request[0] != '*') {
+        printf("Strange prefix '%c', ignore...\n", client->request[0]);
+        return PARSE_ERR;
+    }
+
+    // If total element is not known yet
+    if (client->total_element == 0) {
+        char *location = strstr(client->request, "\r\n");
+        if (location) {
+            // We got at least the number of elements
+            // Parse it
+            if (sscanf(client->request, "*%ld\r\n", &(client->total_element)) != 1) return PARSE_ERR;
+            if (client->total_element > MAX_ARGS || client->total_element <= 0) return PARSE_ERR;
+            client->parse_index = (location - client->request) + CRLF_LEN;
+        } else {
+            // Can't parse the total element now, wait more
+            return PARSE_INCOMPLETE;
+        }
+    }
+
+    // Okay we have num element at this point
+    // Lets try to read it to see if we got a new element in this package
+    while (client->read_element < client->total_element) {
+        // Out of bound error
+        if (client->parse_index >= client->req_offset) return PARSE_INCOMPLETE;
+
+        if (client->request[client->parse_index] != '$') {
+            printf("Trying to parse a string with $ but found %c\n", client->request[client->parse_index]);
+            return PARSE_ERR;
+        }
+
+        char *location = strstr(client->request + client->parse_index, "\r\n");
+        if (!location) {
+            // There is no \r\n, stop and wait. 
+            return PARSE_INCOMPLETE;
+        }
+
+        // Parse the length of the element
+        int len_next_elem;
+        if (sscanf(client->request + client->parse_index, "$%d\r\n", &len_next_elem) != 1) return PARSE_ERR;
+        if (len_next_elem < 0) return PARSE_ERR;
+        ssize_t skip = (location - (client->request + client->parse_index)) + CRLF_LEN + len_next_elem + CRLF_LEN;
+
+        // And then jump
+        if (client->parse_index + skip > client->req_offset) {
+            // Out of bound
+            return PARSE_INCOMPLETE;
+        }
+        else {
+            client->argv[client->read_element] = location + CRLF_LEN;
+            *(location + CRLF_LEN + len_next_elem) = '\0';
+            printf("argv[%ld]: %s\n", client->read_element, client->argv[client->read_element]);
+            client->parse_index += skip;
+            client->read_element++;
+        }
+
+    }
+    return PARSE_OK;
+}
+
 void handle_state_read(int epoll_fd, client_t *client) {
     io_status_t read_status = io_reader(client);
     if (read_status == IO_ERR) {
@@ -329,81 +393,29 @@ void handle_state_read(int epoll_fd, client_t *client) {
     }
     else if (read_status == IO_AGAIN) return;
 
-    // I need to parse how many element
-    // (will) be in the request
-    if (client->request[0] != '*') {
-        printf("Strange prefix '%c', ignore...\n", client->request[0]);
+    parse_status_t parse_status = parse_request(client);
+    if (parse_status == PARSE_ERR) {
         free_client(client);
         return;
     }
+    else if (parse_status == PARSE_INCOMPLETE) return;
 
-    // If num_element is not known yet
-    if (client->total_element == 0) {
-        char *location = strstr(client->request, "\r\n");
-        if (location) {
-            // We got at least the number of elements
-            // Parse it
-            sscanf(client->request, "*%ld\r\n", &(client->total_element));
-            client->parse_index = (location - client->request) + 2;
-        } else {
-            // Can't parse the total element now, wait more
-            return;
-        }
-    }
+    // If done reading, modify the epoll to be write-ready
+    assert(client->read_element == client->total_element);
+    // This will modify the response buffer
+    process_command(client);
 
-    // Okay we have num element at this point
-    // Lets try to read it to see if we got a new elementon this package
-    while (client->read_element < client->total_element) {
-        if (client->parse_index >= client->req_offset) return;
-        if (client->request[client->parse_index] != '$') {
-            printf("Trying to parse a string with $ but found %c\n", client->request[client->parse_index]);
-            free_client(client);
-            return;
-        }
+    client->state = STATE_SEND;
+    client->request_len = client->req_offset;
 
-        char *location = strstr(client->request + client->parse_index, "\r\n");
-        if (!location) {
-            // There is no \r\n, stop. 
-            return;
-        }
-
-        // Parse the length of the element
-        int len_next_elem;
-        sscanf(client->request + client->parse_index, "$%d\r\n", &len_next_elem);
-        ssize_t skip = (location - (client->request + client->parse_index)) + 2 + len_next_elem + 2;
-
-        // And then jump
-        if (client->parse_index + skip > client->req_offset) {
-            // Out of bound
-            return;
-        }
-        else {
-            client->argv[client->read_element] = location + 2;
-            *(location + 2 + len_next_elem) = '\0';
-            printf("argv[%ld]: %s\n", client->read_element, client->argv[client->read_element]);
-            client->parse_index += skip;
-            client->read_element++;
-        }
-
-    }
-
-    if (client->read_element == client->total_element) {
-        // Done and verified reading the whole request
-        process_command(client);
-
-        client->state = STATE_SEND;
-        client->request_len = client->req_offset;
-
-        // Change to write mode
-        struct epoll_event ev;
-        ev.events = EPOLLOUT;
-        ev.data.ptr = client;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
-            perror("Epoll_ctl failed");
-            free_client(client);
-            return;
-        }
-        printf("INFO: total_element: %ld\n", client->total_element);
+    // Change to write mode
+    struct epoll_event ev;
+    ev.events = EPOLLOUT;
+    ev.data.ptr = client;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
+        perror("Epoll_ctl failed");
+        free_client(client);
+        return;
     }
 }
 
