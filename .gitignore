@@ -58,3 +58,7 @@ dkms.conf
 minikart
 test.c
 a.out
+
+# VSCODE
+.vscode/ 
+build/
