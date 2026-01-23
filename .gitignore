@@ -60,5 +60,5 @@ test.c
 a.out
 
 # VSCODE
-.vscode/ 
+.vscode/
 build/
