@@ -17,6 +17,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <signal.h>
+#include "art.h"
 #define PORT 6379
 #define IP_ADDR INADDR_LOOPBACK
 #define BACKLOG 511
@@ -76,6 +77,8 @@ int setup_server_socket();
 int init_epoll(int server_fd);
 void handle_new_connection(int epoll_fd, int server_fd);
 void handle_client_event(int epoll_fd, client_t *client);
+void handle_state_read(int epoll_fd, client_t *client);
+void handle_state_send(int epoll_fd, client_t *client);
 
 int main() {
     signal(SIGPIPE, SIG_IGN);
@@ -252,12 +255,25 @@ void process_command(client_t *client) {
 }
 
 void cleanup_connection(client_t *client) {
+    // After sending the response, need to check 
+    // if there is leftovers in the request buffer
+    ssize_t leftovers = client->request_len - client->parse_index;
+    if (leftovers > 0) {
+        // Shift and zero out the memory
+        memmove(client->request, client->request + client->parse_index, leftovers);
+        memset(client->request + leftovers, 0, client->request_len - leftovers);
+        client->req_offset = leftovers;
+    }
+    else {
+        memset(client->request, 0, client->request_len);
+        client->req_offset = 0;
+    }
+    client->response_len = 0;
+    client->request_len = 0;
+    client->total_element = 0;
+    client->res_offset = 0;
     client->parse_index = 0;
     client->read_element = 0;
-    client->response_len = 0;
-    client->total_element = 0;
-    client->req_offset = 0;
-    client->res_offset = 0;
 }
 
 void handle_state_send(int epoll_fd, client_t *client) {
@@ -286,6 +302,11 @@ void handle_state_send(int epoll_fd, client_t *client) {
         if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
             perror("Epoll add back connection failed");
             free_client(client);
+        }
+        
+        // If there is leftovers, proceed to trigger read
+        if (client->req_offset > 0) {
+            handle_state_read(epoll_fd, client);
         }
     }
 }
@@ -391,7 +412,7 @@ void handle_state_read(int epoll_fd, client_t *client) {
         free_client(client);
         return;
     }
-    else if (read_status == IO_AGAIN) return;
+    else if (read_status == IO_AGAIN && client->req_offset == 0) return;
 
     parse_status_t parse_status = parse_request(client);
     if (parse_status == PARSE_ERR) {
