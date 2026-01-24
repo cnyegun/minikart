@@ -73,12 +73,26 @@ typedef struct {
 
 } client_t;
 
+// Helper
+int set_nonblocking(int fd);
 int setup_server_socket();
 int init_epoll(int server_fd);
+void get_client_ip(int client_fd, char *buffer, size_t buff_len);
+
+// Core networking 
 void handle_new_connection(int epoll_fd, int server_fd);
 void handle_client_event(int epoll_fd, client_t *client);
+void free_client(client_t *client);
+void cleanup_connection(client_t *client);
+
+// State handler 
 void handle_state_read(int epoll_fd, client_t *client);
 void handle_state_send(int epoll_fd, client_t *client);
+
+// IO & Parsing
+io_status_t io_reader(client_t *client);
+parse_status_t parse_request(client_t *client);
+void process_command(client_t *client);
 
 int main() {
     signal(SIGPIPE, SIG_IGN);
@@ -276,6 +290,20 @@ void cleanup_connection(client_t *client) {
     client->read_element = 0;
 }
 
+void get_client_ip(int client_fd, char *buffer, size_t buff_len) {
+    struct sockaddr_in addr;
+    socklen_t socklen = sizeof(addr);
+    if (getpeername(client_fd, (struct sockaddr*)&addr, &socklen) == -1) {
+        perror("Failed to get client address");
+        strncpy(buffer, "Unknown", buff_len);
+        return;
+    }
+    if (inet_ntop(AF_INET, &addr.sin_addr, buffer, buff_len) == NULL) {
+        perror("inet_top failed");
+        strncpy(buffer, "Unknown", buff_len);
+    }
+}
+
 void handle_state_send(int epoll_fd, client_t *client) {
     ssize_t bytes_sent = write(
         client->client_fd,
@@ -334,6 +362,11 @@ io_status_t io_reader(client_t *client) {
 
     if (bytes_read == 0) {
         // The client want to close connection
+        char client_ipv4[32];
+        socklen_t ipv4_len = 32;
+        get_client_ip(client->client_fd, client_ipv4, ipv4_len);
+        
+        printf("Client %s has closed connection.\n", client_ipv4);
         return IO_ERR;
     }
     assert(bytes_read > 0);
@@ -342,6 +375,7 @@ io_status_t io_reader(client_t *client) {
 
     return IO_OK;
 }
+
 
 parse_status_t parse_request(client_t *client) {
     // I need to parse how many element
