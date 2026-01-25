@@ -52,6 +52,11 @@ typedef enum {
 } type_t;
 
 typedef struct {
+    size_t len;
+    char data[];
+} blob_t;
+
+typedef struct {
     int fd;
     uint32_t state;
 
@@ -62,7 +67,7 @@ typedef struct {
     } input;
 
     struct {
-        char *args[MAX_ARGS];
+        blob_t *args[MAX_ARGS];
         uint32_t count;
         uint32_t parsed;
     } cmd;
@@ -80,6 +85,7 @@ int set_nonblocking(int fd);
 int server_init();
 int epoll_init(int server_fd);
 void get_client_ip(int client_fd, char *buffer, size_t buff_len);
+blob_t *blob_create(const char *src, size_t len);
 
 // Core networking 
 void accept_connection(int epoll_fd, int server_fd);
@@ -91,13 +97,25 @@ void on_event(int epoll_fd, client_t *client);
 void on_read(int epoll_fd, client_t *client);
 void on_write(int epoll_fd, client_t *client);
 
+// Command handler
+void do_set(client_t *client);
+void do_get(client_t *client);
+
 // IO & Parsing
 io_status_t sys_read(client_t *client);
 parse_status_t parse_request(client_t *client);
 void exec_cmd(client_t *client);
 
+static art_tree g_keyspace;
+
 int main() {
     signal(SIGPIPE, SIG_IGN);
+
+    if (art_tree_init(&g_keyspace) != 0) {
+        perror("Failed to init ART keyspace");
+        exit(EXIT_FAILURE);
+    }
+
     int server_fd = server_init();
     int epoll_fd = epoll_init(server_fd);
     printf("minikart is listening on port %d...\n", PORT);
@@ -256,12 +274,22 @@ void free_client(client_t *client) {
 void exec_cmd(client_t *client) {
     if (!client || client->cmd.count == 0) return;
 
-    if (strcasecmp(client->cmd.args[0], "PING") == 0) {
+    blob_t *cmd = client->cmd.args[0];
+
+    if (cmd->len == 4 && strncasecmp(client->cmd.args[0]->data, "PING", 4) == 0) {
         const char *reply = "+PONG\r\n";
         size_t len = strlen(reply);
         memcpy(client->output.buf, reply, len);
         client->output.len = len; 
         return;
+    }
+
+    else if (cmd->len == 3 && strncasecmp(cmd->data, "SET", 3) == 0) {
+        do_set(client);
+    }
+
+    else if (cmd->len == 3 && strncasecmp(cmd->data, "GET", 3) == 0) {
+        do_get(client);
     }
 
     // Default: Unknown Command
@@ -274,6 +302,14 @@ void conn_reset(client_t *client) {
     // After sending the response, need to check 
     // if there is leftovers in the request buffer
     ssize_t leftovers = client->input.len - client->input.scan_pos;
+    // Free the current args blob first.
+    size_t cmd_count = client->cmd.count;
+    for (size_t i = 0; i < cmd_count; i++) {
+        free(client->cmd.args[i]);
+        client->cmd.args[i] = NULL;
+    }
+
+    // Buffer management logic (shifting)
     if (leftovers > 0) {
         // Shift and zero out the memory
         memmove(client->input.buf, client->input.buf + client->input.scan_pos, leftovers);
@@ -380,7 +416,9 @@ io_status_t sys_read(client_t *client) {
     
     assert(bytes_read > 0);
     client->input.len += bytes_read;
-    client->input.buf[client->input.len] = '\0'; // Safety null-termination
+    if (client->input.len < REQUEST_BUFF_LEN) {
+        client->input.buf[client->input.len] = '\0'; // Safety null-termination
+    }
 
     return IO_OK;
 }
@@ -471,10 +509,10 @@ parse_status_t parse_req(client_t *client) {
 
         // We have the full string! Set the pointer.
         
-        client->cmd.args[client->cmd.parsed] = buf + client->input.scan_pos;
-        
-        // Null-terminate the string argument (overwriting the \r)
-        client->cmd.args[client->cmd.parsed][len_next_cmd] = '\0';
+        blob_t *new_blob = blob_create(buf + client->input.scan_pos, len_next_cmd);
+        if (!new_blob) return PARSE_ERR;
+
+        client->cmd.args[client->cmd.parsed] = new_blob;
 
         // Advance cursor and counter
         client->input.scan_pos += len_next_cmd + CRLF_LEN;
@@ -546,4 +584,23 @@ void on_event(int epoll_fd, client_t *client) {
             break;
 
     }
+}
+
+blob_t *blob_create(const char *src, size_t len) {
+    blob_t *b = malloc(sizeof *b + len + 1);
+    if (!b) return NULL;
+    b->len = len;
+    memcpy(b->data, src, len);
+    b->data[len] = '\0';
+    return b;
+}
+
+void do_set(client_t *client) {
+    assert(client->cmd.count == 3);
+    (void)client;
+}
+
+void do_get(client_t *client) {
+    assert(client->cmd.count == 3);
+    (void)client;
 }
