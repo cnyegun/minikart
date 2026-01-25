@@ -288,7 +288,7 @@ void exec_cmd(client_t *client) {
         do_set(client);
     }
 
-    else if (cmd->len == 3 && strncasecmp(cmd->data, "GET", 3) == 0) {
+    else if (cmd->len == 2 && strncasecmp(cmd->data, "GET", 3) == 0) {
         do_get(client);
     }
 
@@ -596,11 +596,21 @@ blob_t *blob_create(const char *src, size_t len) {
 }
 
 void do_set(client_t *client) {
-    assert(client->cmd.count == 3);
+    if (client->cmd.count != 3) {
+        const char *err = "-ERR wrong number of arguments for 'set'\r\n";
+        memcpy(client->output.buf, err, strlen(err));
+        client->output.len = strlen(err);
+        return;
+    }
     (void)client;
 }
 
 void do_get(client_t *client) {
-    assert(client->cmd.count == 3);
+    if (client->cmd.count != 2) {
+        const char *err = "-ERR wrong number of arguments for 'get'\r\n";
+        memcpy(client->output.buf, err, strlen(err));
+        client->output.len = strlen(err);
+        return;
+    }
     (void)client;
 }
