@@ -288,7 +288,7 @@ void exec_cmd(client_t *client) {
         do_set(client);
     }
 
-    else if (cmd->len == 2 && strncasecmp(cmd->data, "GET", 3) == 0) {
+    else if (cmd->len == 3 && strncasecmp(cmd->data, "GET", 3) == 0) {
         do_get(client);
     }
 
