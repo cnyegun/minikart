@@ -1,5 +1,3 @@
-#include <asm-generic/errno-base.h>
-#include <asm-generic/errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -22,8 +20,8 @@
 #define IP_ADDR INADDR_LOOPBACK
 #define BACKLOG 511
 #define MAX_EVENTS 128
-#define REQUEST_BUFF_LEN 4096
-#define RESPONSE_BUFF_LEN 4096
+#define REQUEST_BUFF_LEN 4000
+#define RESPONSE_BUFF_LEN 4000
 #define MAX_ARGS 16
 #define CRLF_LEN 2
 
@@ -53,51 +51,54 @@ typedef enum {
 } type_t;
 
 typedef struct {
+    int fd;
+    uint32_t state;
 
-    int client_fd;
-    state_t state;
-    type_t type;
+    struct {
+        char buf[REQUEST_BUFF_LEN];
+        uint32_t len;
+        uint32_t scan_pos;
+    } input;
 
-    char request[REQUEST_BUFF_LEN];
-    ssize_t request_len;
-    ssize_t req_offset;
-    ssize_t total_element;
-    ssize_t read_element;
-    ssize_t parse_index;
+    struct {
+        char *args[MAX_ARGS];
+        uint32_t count;
+        uint32_t parsed;
+    } cmd;
 
-    char *argv[MAX_ARGS];
-
-    char response[RESPONSE_BUFF_LEN];
-    ssize_t response_len;
-    ssize_t res_offset;
+    struct {
+        char buf[RESPONSE_BUFF_LEN];
+        uint32_t len;
+        uint32_t sent_pos;
+    } output;
 
 } client_t;
 
 // Helper
 int set_nonblocking(int fd);
-int setup_server_socket();
-int init_epoll(int server_fd);
+int server_init();
+int epoll_init(int server_fd);
 void get_client_ip(int client_fd, char *buffer, size_t buff_len);
 
 // Core networking 
-void handle_new_connection(int epoll_fd, int server_fd);
-void handle_client_event(int epoll_fd, client_t *client);
+void accept_connection(int epoll_fd, int server_fd);
 void free_client(client_t *client);
-void cleanup_connection(client_t *client);
+void conn_reset(client_t *client);
+void on_event(int epoll_fd, client_t *client);
 
 // State handler 
-void handle_state_read(int epoll_fd, client_t *client);
-void handle_state_send(int epoll_fd, client_t *client);
+void on_read(int epoll_fd, client_t *client);
+void on_write(int epoll_fd, client_t *client);
 
 // IO & Parsing
-io_status_t io_reader(client_t *client);
+io_status_t sys_read(client_t *client);
 parse_status_t parse_request(client_t *client);
-void process_command(client_t *client);
+void exec_cmd(client_t *client);
 
 int main() {
     signal(SIGPIPE, SIG_IGN);
-    int server_fd = setup_server_socket();
-    int epoll_fd = init_epoll(server_fd);
+    int server_fd = server_init();
+    int epoll_fd = epoll_init(server_fd);
     printf("minikart is listening on port %d...\n", PORT);
 
     // Event loop
@@ -113,10 +114,10 @@ int main() {
 
         for (int i = 0; i < ready_events; i++) {
             if(events[i].data.ptr == NULL) {
-                handle_new_connection(epoll_fd, server_fd);
+                accept_connection(epoll_fd, server_fd);
             } else {
                 client_t *client = (client_t *)events[i].data.ptr;
-                handle_client_event(epoll_fd, client);
+                on_event(epoll_fd, client);
             }
         }
     }
@@ -131,7 +132,7 @@ int set_nonblocking(int fd) {
 }
 
 // Returns server_fd if sucess, crash if failed
-int setup_server_socket() {
+int server_init() {
     // Create server socket
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -175,7 +176,7 @@ int setup_server_socket() {
     return server_fd;
 }
 
-int init_epoll(int server_fd) {
+int epoll_init(int server_fd) {
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) {
         perror("Epoll create failed");
@@ -198,7 +199,7 @@ int init_epoll(int server_fd) {
     return epoll_fd;
 }
 
-void handle_new_connection(int epoll_fd, int server_fd) {
+void accept_connection(int epoll_fd, int server_fd) {
     printf("You got a new connection!\n");
     struct sockaddr_in client_addr;
     socklen_t socklen = sizeof(client_addr);
@@ -228,7 +229,7 @@ void handle_new_connection(int epoll_fd, int server_fd) {
         return;
     }
 
-    client->client_fd = client_fd;
+    client->fd = client_fd;
     client->state = STATE_READ;
 
     struct epoll_event ev;
@@ -246,48 +247,49 @@ void handle_new_connection(int epoll_fd, int server_fd) {
 void free_client(client_t *client) {
     if (!client) return;
 
-    if (client->client_fd > 0)
-        close(client->client_fd);
+    if (client->fd > 0)
+        close(client->fd);
     free(client);
 }
 
-void process_command(client_t *client) {
-    if (!client || client->total_element == 0) return;
+void exec_cmd(client_t *client) {
+    if (!client || client->cmd.count == 0) return;
 
-    if (strcasecmp(client->argv[0], "PING") == 0) {
+    if (strcasecmp(client->cmd.args[0], "PING") == 0) {
         const char *reply = "+PONG\r\n";
         size_t len = strlen(reply);
-        memcpy(client->response, reply, len);
-        client->response_len = len; 
+        memcpy(client->output.buf, reply, len);
+        client->output.len = len; 
         return;
     }
 
     // Default: Unknown Command
     const char *err = "-ERR unknown command\r\n";
-    memcpy(client->response, err, strlen(err));
-    client->response_len = strlen(err);
+    memcpy(client->output.buf, err, strlen(err));
+    client->output.len = strlen(err);
 }
 
-void cleanup_connection(client_t *client) {
+void conn_reset(client_t *client) {
     // After sending the response, need to check 
     // if there is leftovers in the request buffer
-    ssize_t leftovers = client->request_len - client->parse_index;
+    ssize_t leftovers = client->input.len - client->input.scan_pos;
     if (leftovers > 0) {
         // Shift and zero out the memory
-        memmove(client->request, client->request + client->parse_index, leftovers);
-        memset(client->request + leftovers, 0, client->request_len - leftovers);
-        client->req_offset = leftovers;
+        memmove(client->input.buf, client->input.buf + client->input.scan_pos, leftovers);
+        memset(client->input.buf + leftovers, 0, client->input.len - leftovers);
+        client->input.len = leftovers;
     }
     else {
-        memset(client->request, 0, client->request_len);
-        client->req_offset = 0;
+        memset(client->input.buf, 0, client->input.len);
+        client->input.len = 0;
     }
-    client->response_len = 0;
-    client->request_len = 0;
-    client->total_element = 0;
-    client->res_offset = 0;
-    client->parse_index = 0;
-    client->read_element = 0;
+    client->output.len = 0;
+    // Note: client->input.len was previously used as request_len 
+    // It is updated above in the shift logic.
+    client->cmd.count = 0;
+    client->output.sent_pos = 0;
+    client->input.scan_pos = 0;
+    client->cmd.parsed = 0;
 }
 
 void get_client_ip(int client_fd, char *buffer, size_t buff_len) {
@@ -304,11 +306,11 @@ void get_client_ip(int client_fd, char *buffer, size_t buff_len) {
     }
 }
 
-void handle_state_send(int epoll_fd, client_t *client) {
+void on_write(int epoll_fd, client_t *client) {
     ssize_t bytes_sent = write(
-        client->client_fd,
-        client->response + client->res_offset,
-        client->response_len - client->res_offset
+        client->fd,
+        client->output.buf + client->output.sent_pos,
+        client->output.len - client->output.sent_pos
     );
 
     if (bytes_sent < 0) {
@@ -318,42 +320,48 @@ void handle_state_send(int epoll_fd, client_t *client) {
         return;
     }
 
-    client->res_offset += bytes_sent;
+    client->output.sent_pos += bytes_sent;
     
-    if (client->res_offset == client->response_len) {
-        cleanup_connection(client);
+    // Check if we have sent the full response
+    if (client->output.sent_pos == client->output.len) {
+        conn_reset(client);
         client->state = STATE_READ;
+        
         struct epoll_event ev;
         ev.events = EPOLLIN;
         ev.data.ptr = client;
 
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &ev) < 0) {
             perror("Epoll add back connection failed");
             free_client(client);
+            return;
         }
         
-        // If there is leftovers, proceed to trigger read
-        if (client->req_offset > 0) {
-            handle_state_read(epoll_fd, client);
+        // Pipeline Optimization:
+        // If conn_reset() found leftovers (input.len > 0),
+        // we immediately process them as the next request.
+        if (client->input.len > 0) {
+            on_read(epoll_fd, client);
         }
     }
 }
 
-io_status_t io_reader(client_t *client) {
-    if (REQUEST_BUFF_LEN - client->req_offset < 2) {
+io_status_t sys_read(client_t *client) {
+    // Check if buffer is full (need at least 1 byte + 1 null terminator)
+    if (REQUEST_BUFF_LEN - client->input.len < 2) {
         printf("Buffer full!\n");
         return IO_ERR;
     }
 
     ssize_t bytes_read = read(
-        client->client_fd,
-        client->request + client->req_offset,
-        REQUEST_BUFF_LEN - client->req_offset - 1
+        client->fd,
+        client->input.buf + client->input.len,
+        REQUEST_BUFF_LEN - client->input.len - 1
     );
 
     if (bytes_read < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // Try again
+            // Socket is not ready yet, try again later
             return IO_AGAIN;
         }
         perror("Read request failed");
@@ -363,111 +371,142 @@ io_status_t io_reader(client_t *client) {
     if (bytes_read == 0) {
         // The client want to close connection
         char client_ipv4[32];
-        socklen_t ipv4_len = 32;
-        get_client_ip(client->client_fd, client_ipv4, ipv4_len);
+        get_client_ip(client->fd, client_ipv4, sizeof(client_ipv4));
         
         printf("Client %s has closed connection.\n", client_ipv4);
         return IO_ERR;
     }
+    
     assert(bytes_read > 0);
-    client->req_offset += bytes_read;
-    client->request[client->req_offset] = '\0';
+    client->input.len += bytes_read;
+    client->input.buf[client->input.len] = '\0'; // Safety null-termination
 
     return IO_OK;
 }
 
 
-parse_status_t parse_request(client_t *client) {
-    // I need to parse how many element
-    // (will) be in the request
-    if (client->request[0] != '*') {
-        printf("Strange prefix '%c', ignore...\n", client->request[0]);
+parse_status_t parse_req(client_t *client) {
+    // Alias for cleaner code, compiler will optimize it away
+    char *buf = client->input.buf; 
+
+    // 1. Basic Validation
+    if (buf[0] != '*') {
+        printf("Strange prefix '%c', ignore...\n", buf[0]);
         return PARSE_ERR;
     }
 
-    // If total element is not known yet
-    if (client->total_element == 0) {
-        char *location = strstr(client->request, "\r\n");
+    // 2. Parse Command Count (*3\r\n)
+    // If we haven't determined the total arguments yet:
+    if (client->cmd.count == 0) {
+        char *location = strstr(buf, "\r\n");
         if (location) {
-            // We got at least the number of elements
-            // Parse it
-            if (sscanf(client->request, "*%ld\r\n", &(client->total_element)) != 1) return PARSE_ERR;
-            if (client->total_element > MAX_ARGS || client->total_element <= 0) return PARSE_ERR;
-            client->parse_index = (location - client->request) + CRLF_LEN;
+            // We found the first line, parse the count
+            long count_temp;
+            if (sscanf(buf, "*%ld\r\n", &count_temp) != 1) return PARSE_ERR;
+            
+            if (count_temp > MAX_ARGS || count_temp <= 0) return PARSE_ERR;
+            
+            client->cmd.count = (uint32_t)count_temp;
+            client->input.scan_pos = (location - buf) + CRLF_LEN;
         } else {
-            // Can't parse the total element now, wait more
+            // We have '*' but no newline yet
             return PARSE_INCOMPLETE;
         }
     }
 
-    // Okay we have num element at this point
-    // Lets try to read it to see if we got a new element in this package
-    while (client->read_element < client->total_element) {
-        // Out of bound error
-        if (client->parse_index >= client->req_offset) return PARSE_INCOMPLETE;
+    // 3. Parse Arguments ($3\r\nSET\r\n)
+    while (client->cmd.parsed < client->cmd.count) {
+        
+        // Ensure we don't read past what we have received
+        if (client->input.scan_pos >= client->input.len) return PARSE_INCOMPLETE;
 
-        if (client->request[client->parse_index] != '$') {
-            printf("Trying to parse a string with $ but found %c\n", client->request[client->parse_index]);
+        // Verify prefix '$' for Bulk Strings
+        if (buf[client->input.scan_pos] != '$') {
+            printf("Expected '$', found '%c'\n", buf[client->input.scan_pos]);
             return PARSE_ERR;
         }
 
-        char *location = strstr(client->request + client->parse_index, "\r\n");
-        if (!location) {
-            // There is no \r\n, stop and wait. 
+        // Find the length line delimiter
+        char *len_end = strstr(buf + client->input.scan_pos, "\r\n");
+        if (!len_end) {
             return PARSE_INCOMPLETE;
         }
 
-        // Parse the length of the element
+        // Parse the length of the next string
         int len_next_elem;
-        if (sscanf(client->request + client->parse_index, "$%d\r\n", &len_next_elem) != 1) return PARSE_ERR;
+        if (sscanf(buf + client->input.scan_pos, "$%d\r\n", &len_next_elem) != 1) return PARSE_ERR;
         if (len_next_elem < 0) return PARSE_ERR;
-        ssize_t skip = (location - (client->request + client->parse_index)) + CRLF_LEN + len_next_elem + CRLF_LEN;
 
-        // And then jump
-        if (client->parse_index + skip > client->req_offset) {
-            // Out of bound
+        // Calculate total size of this argument in the stream:
+        // $ [LengthDigits] \r\n [Content] \r\n
+        // ^ scan_pos      ^ len_end       ^ expected end of content
+        
+        size_t header_len = (len_end - (buf + client->input.scan_pos)) + CRLF_LEN;
+        size_t total_arg_len = header_len + len_next_elem + CRLF_LEN;
+
+        // Check if we have the FULL argument in the buffer
+        if (client->input.scan_pos + total_arg_len > client->input.len) {
             return PARSE_INCOMPLETE;
         }
-        else {
-            client->argv[client->read_element] = location + CRLF_LEN;
-            *(location + CRLF_LEN + len_next_elem) = '\0';
-            printf("argv[%ld]: %s\n", client->read_element, client->argv[client->read_element]);
-            client->parse_index += skip;
-            client->read_element++;
-        }
 
+        // We have the full string! Set the pointer.
+        // The actual string starts after the header ($Len\r\n)
+        char *arg_start = len_end + CRLF_LEN;
+        
+        client->cmd.args[client->cmd.parsed] = arg_start;
+        
+        // Null-terminate the string argument (overwriting the \r)
+        arg_start[len_next_elem] = '\0';
+        
+        printf("argv[%d]: %s\n", client->cmd.parsed, client->cmd.args[client->cmd.parsed]);
+        
+        // Advance cursor and counter
+        client->input.scan_pos += total_arg_len;
+        client->cmd.parsed++;
     }
+
     return PARSE_OK;
 }
 
-void handle_state_read(int epoll_fd, client_t *client) {
-    io_status_t read_status = io_reader(client);
+void on_read(int epoll_fd, client_t *client) {
+    io_status_t read_status = sys_read(client);
+    
     if (read_status == IO_ERR) {
         free_client(client);
         return;
     }
-    else if (read_status == IO_AGAIN && client->req_offset == 0) return;
+    // If no data is available (EAGAIN) and we have an empty buffer, stop and wait.
+    // If buffer is NOT empty, we might have enough data from a previous read to parse.
+    else if (read_status == IO_AGAIN && client->input.len == 0) return;
 
-    parse_status_t parse_status = parse_request(client);
+    parse_status_t parse_status = parse_req(client);
+    
     if (parse_status == PARSE_ERR) {
         free_client(client);
         return;
     }
-    else if (parse_status == PARSE_INCOMPLETE) return;
+    else if (parse_status == PARSE_INCOMPLETE) {
+        // Not enough data for a full command yet, wait for next EPOLLIN
+        return;
+    }
 
-    // If done reading, modify the epoll to be write-ready
-    assert(client->read_element == client->total_element);
-    // This will modify the response buffer
-    process_command(client);
+    // Sanity check: Parser claims success, so we must have all arguments
+    assert(client->cmd.parsed == client->cmd.count);
+    
+    // Execute command (fills client->output.buf)
+    exec_cmd(client);
 
     client->state = STATE_SEND;
-    client->request_len = client->req_offset;
+    
+    // Note: Old code assigned request_len = req_offset here.
+    // In new struct, client->input.len is already the correct length, so we skip it.
 
-    // Change to write mode
+    // Change Epoll state to WRITE (EPOLLOUT)
     struct epoll_event ev;
     ev.events = EPOLLOUT;
     ev.data.ptr = client;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->client_fd, &ev) < 0) {
+    
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &ev) < 0) {
         perror("Epoll_ctl failed");
         free_client(client);
         return;
@@ -475,17 +514,17 @@ void handle_state_read(int epoll_fd, client_t *client) {
 }
 
 
-void handle_client_event(int epoll_fd, client_t *client) {
+void on_event(int epoll_fd, client_t *client) {
     if (!client) return;
     (void)epoll_fd;
 
     switch (client->state) {
 
         case STATE_READ:
-            handle_state_read(epoll_fd, client);
+            on_read(epoll_fd, client);
             break;
         case STATE_SEND:
-            handle_state_send(epoll_fd, client);
+            on_write(epoll_fd, client);
             break;
         case STATE_DONE:
             break;
