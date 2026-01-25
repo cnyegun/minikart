@@ -1,5 +1,5 @@
 # minikart - modern cache-friendly key-value database
 
-Redis is too slow for your application? hear me out...
+For something redis-compatible but faster in lookups.
 
 Under active construction.
