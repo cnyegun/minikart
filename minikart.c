@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -398,20 +399,23 @@ parse_status_t parse_req(client_t *client) {
     // 2. Parse Command Count (*3\r\n)
     // If we haven't determined the total arguments yet:
     if (client->cmd.count == 0) {
-        char *location = strstr(buf, "\r\n");
-        if (location) {
-            // We found the first line, parse the count
-            long count_temp;
-            if (sscanf(buf, "*%ld\r\n", &count_temp) != 1) return PARSE_ERR;
-            
-            if (count_temp > MAX_ARGS || count_temp <= 0) return PARSE_ERR;
-            
-            client->cmd.count = (uint32_t)count_temp;
-            client->input.scan_pos = (location - buf) + CRLF_LEN;
-        } else {
-            // We have '*' but no newline yet
+        char *line_end = strstr(buf, "\r\n");
+        if (!line_end) {
             return PARSE_INCOMPLETE;
         }
+
+        // We found the first line, parse the count
+        uint32_t count = 0;
+        for (char *p = buf + 1; p < line_end; p++) {
+            char c = *p;
+            if (c < '0' || c > '9') return PARSE_ERR;
+            count = (count * 10) + (c - '0');
+        }
+        
+        if (count > MAX_ARGS || count <= 0) return PARSE_ERR;
+        
+        client->cmd.count = count;
+        client->input.scan_pos = (line_end - buf) + CRLF_LEN;
     }
 
     // 3. Parse Arguments ($3\r\nSET\r\n)
@@ -426,42 +430,54 @@ parse_status_t parse_req(client_t *client) {
             return PARSE_ERR;
         }
 
-        // Find the length line delimiter
-        char *len_end = strstr(buf + client->input.scan_pos, "\r\n");
-        if (!len_end) {
-            return PARSE_INCOMPLETE;
+        // Skip '$'
+        client->input.scan_pos++;
+        int len_next_cmd = 0;
+
+        // Parse the length integer manually
+        while (1) {
+            if (client->input.scan_pos >= client->input.len) {
+                return PARSE_INCOMPLETE;
+            }
+
+            char c = buf[client->input.scan_pos];
+
+            if (c == '\r') {
+                if (client->input.scan_pos + 1 >= client->input.len) {
+                    return PARSE_INCOMPLETE;
+                }
+                if (buf[client->input.scan_pos + 1] != '\n') {
+                    return PARSE_ERR;
+                }
+                client->input.scan_pos += 2; // Skip \r\n
+                break;
+            }
+            
+            if (c < '0' || c > '9') {
+                printf("Protocol Error: Expected digit, got '%c'", c);
+                return PARSE_ERR;
+            }
+
+            len_next_cmd = (len_next_cmd * 10) + (c - '0');
+            client->input.scan_pos++;
         }
 
-        // Parse the length of the next string
-        int len_next_elem;
-        if (sscanf(buf + client->input.scan_pos, "$%d\r\n", &len_next_elem) != 1) return PARSE_ERR;
-        if (len_next_elem < 0) return PARSE_ERR;
-
-        // Calculate total size of this argument in the stream:
-        // $ [LengthDigits] \r\n [Content] \r\n
-        // ^ scan_pos      ^ len_end       ^ expected end of content
-        
-        size_t header_len = (len_end - (buf + client->input.scan_pos)) + CRLF_LEN;
-        size_t total_arg_len = header_len + len_next_elem + CRLF_LEN;
+        if (len_next_cmd < 0) return PARSE_ERR;
 
         // Check if we have the FULL argument in the buffer
-        if (client->input.scan_pos + total_arg_len > client->input.len) {
+        if (client->input.scan_pos + len_next_cmd + CRLF_LEN > client->input.len) {
             return PARSE_INCOMPLETE;
         }
 
         // We have the full string! Set the pointer.
-        // The actual string starts after the header ($Len\r\n)
-        char *arg_start = len_end + CRLF_LEN;
         
-        client->cmd.args[client->cmd.parsed] = arg_start;
+        client->cmd.args[client->cmd.parsed] = buf + client->input.scan_pos;
         
         // Null-terminate the string argument (overwriting the \r)
-        arg_start[len_next_elem] = '\0';
-        
-        printf("argv[%d]: %s\n", client->cmd.parsed, client->cmd.args[client->cmd.parsed]);
-        
+        client->cmd.args[client->cmd.parsed][len_next_cmd] = '\0';
+
         // Advance cursor and counter
-        client->input.scan_pos += total_arg_len;
+        client->input.scan_pos += len_next_cmd + CRLF_LEN;
         client->cmd.parsed++;
     }
 
