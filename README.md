@@ -8,10 +8,10 @@ Todo:
 - [x] PING
 - [x] GET 
 - [x] SET
-- [] DEL 
-- [] EXPIRE
-- [] HGET
-- [] HSET
-- [] HGETALL
-- [] LPUSH
-- [] RPOP
+- [ ] DEL 
+- [ ] EXPIRE
+- [ ] HGET
+- [ ] HSET
+- [ ] HGETALL
+- [ ] LPUSH
+- [ ] RPOP
