@@ -100,6 +100,7 @@ void on_write(int epoll_fd, client_t *client);
 // Command handler
 void do_set(client_t *client);
 void do_get(client_t *client);
+void do_del(client_t *client);
 
 // IO & Parsing
 io_status_t sys_read(client_t *client);
@@ -291,6 +292,11 @@ void exec_cmd(client_t *client) {
 
     else if (cmd->len == 3 && strncasecmp(cmd->data, "GET", 3) == 0) {
         do_get(client);
+        return;
+    }
+
+    else if (cmd->len == 3 && strncasecmp(cmd->data, "DEL", 3) == 0) {
+        do_del(client);
         return;
     }
 
@@ -599,7 +605,7 @@ blob_t *blob_create(const char *src, size_t len) {
 
 void do_set(client_t *client) {
     if (client->cmd.count != 3) {
-        const char *err = "-ERR wrong number of arguments for 'set'\r\n";
+        const char *err = "-ERR wrong number of arguments for 'SET'\r\n";
         memcpy(client->output.buf, err, strlen(err));
         client->output.len = strlen(err);
         return;
@@ -625,7 +631,7 @@ void do_set(client_t *client) {
 
 void do_get(client_t *client) {
     if (client->cmd.count != 2) {
-        const char *err = "-ERR wrong number of arguments for 'get'\r\n";
+        const char *err = "-ERR wrong number of arguments for 'GET'\r\n";
         memcpy(client->output.buf, err, strlen(err));
         client->output.len = strlen(err);
         return;
@@ -649,4 +655,25 @@ void do_get(client_t *client) {
     memcpy(client->output.buf + header_len, result->data, result->len);
     memcpy(client->output.buf + header_len + result->len, "\r\n", 2);
     client->output.len = header_len + result->len + 2;
+}
+
+void do_del(client_t *client) {
+    size_t cmd_count = client->cmd.count;
+    blob_t **args = client->cmd.args;
+    if (cmd_count < 2) {
+        const char *err = "-ERR wrong number of arguments for 'DEL'\r\n";
+        memcpy(client->output.buf, err, strlen(err));
+        client->output.len = strlen(err);
+        return;
+    }
+    uint32_t delete_count = 0;
+    for (size_t i = 1; i < cmd_count; i++) {
+        blob_t *result = art_delete(&g_keyspace, (const unsigned char*)args[i]->data, args[i]->len);
+        if (result != NULL) {
+            free(result);
+            delete_count++;
+        }
+    }
+
+    client->output.len = snprintf(client->output.buf, RESPONSE_BUFF_LEN, ":%d\r\n", delete_count);
 }
