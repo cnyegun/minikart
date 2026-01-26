@@ -44,13 +44,6 @@ typedef enum {
     PARSE_ERR
 } parse_status_t;
 
-typedef enum {
-    TYPE_NULL,
-    TYPE_STRING,
-    TYPE_ERROR,
-    TYPE_INT,
-} type_t;
-
 typedef struct {
     size_t len;
     char data[];
@@ -80,6 +73,13 @@ typedef struct {
 
 } client_t;
 
+typedef struct {
+    client_t *client;
+    int count;
+    char temp_buf[3000]; 
+    int temp_len;
+} keys_ctx_t;
+
 // Helper
 int set_nonblocking(int fd);
 int server_init();
@@ -103,6 +103,7 @@ void do_get(client_t *client);
 void do_del(client_t *client);
 void do_dbsize(client_t *client);
 void do_flush(client_t *client);
+void do_keys(client_t *client);
 
 // IO & Parsing
 io_status_t sys_read(client_t *client);
@@ -307,8 +308,13 @@ void exec_cmd(client_t *client) {
         return;
     }
 
-    else if (cmd->len == 5 && strncasecmp(cmd->data, "FLUSH", 5) == 0) {
+    else if (cmd->len == 7 && strncasecmp(cmd->data, "FLUSHDB", 7) == 0) {
         do_flush(client);
+        return;
+    }
+
+    else if (cmd->len == 4 && strncasecmp(cmd->data, "KEYS", 4) == 0) {
+        do_keys(client);
         return;
     }
 
@@ -707,7 +713,7 @@ int free_blob_callback(void *data, const unsigned char *key, uint32_t key_len, v
 
 void do_flush(client_t *client) {
     if (client->cmd.count != 1) {
-        const char *err = "-ERR wrong number of arguments for 'FLUSH'\r\n";
+        const char *err = "-ERR wrong number of arguments for 'FLUSHDB'\r\n";
         memcpy(client->output.buf, err, strlen(err));
         client->output.len = strlen(err);
         return;
@@ -718,4 +724,58 @@ void do_flush(client_t *client) {
     const char *ok = "+OK\r\n";
     memcpy(client->output.buf, ok, strlen(ok));
     client->output.len = strlen(ok);
+}
+
+int keys_callback(void *data, const unsigned char *key, uint32_t key_len, void *val) {
+    keys_ctx_t *ctx = (keys_ctx_t *)data;
+
+    // Safety stop: Don't overflow the temp buffer
+    // $len\r\nkey\r\n is roughly key_len + 10 bytes overhead
+    if (ctx->temp_len + key_len + 10 >= sizeof(ctx->temp_buf)) {
+        return 1; // Stop iterating (return non-zero stops art_iter)
+    }
+
+    // Format: $<len>\r\n<key>\r\n
+    int written = snprintf(ctx->temp_buf + ctx->temp_len, 
+                           sizeof(ctx->temp_buf) - ctx->temp_len, 
+                           "$%u\r\n%.*s\r\n", 
+                           key_len, key_len, key);
+    
+    ctx->temp_len += written;
+    ctx->count++;
+    return 0; // Keep going
+}
+
+void do_keys(client_t *client) {
+    if (client->cmd.count != 2) {
+        const char *err = "-ERR wrong number of arguments for 'KEYS'\r\n";
+        memcpy(client->output.buf, err, strlen(err));
+        client->output.len = strlen(err);
+        return; 
+    }
+
+    blob_t *pattern = client->cmd.args[1];
+    keys_ctx_t ctx = { .client = client, .count = 0, .temp_len = 0 };
+
+    // If pattern ends with *, strip it and do a prefix search
+    // If pattern is just "*", we iterate everything.
+    if (pattern->len > 1 && pattern->data[pattern->len - 1] == '*') {
+        // Search prefix: "user:*" -> search "user:"
+        art_iter_prefix(&g_keyspace, (unsigned char*)pattern->data, pattern->len - 1, keys_callback, &ctx);
+    } else if (pattern->len == 1 && pattern->data[0] == '*') {
+        // Search all
+        art_iter(&g_keyspace, keys_callback, &ctx);
+    } else {
+        // Exact match (boring, but supported)
+        art_iter_prefix(&g_keyspace, (unsigned char*)pattern->data, pattern->len, keys_callback, &ctx);
+    }
+
+    // Now write the final response: *<count>\r\n<all_the_keys>
+    int header_len = snprintf(client->output.buf, RESPONSE_BUFF_LEN, "*%d\r\n", ctx.count);
+    
+    // Copy header
+    // Copy the accumulated keys from temp_buf
+    memcpy(client->output.buf + header_len, ctx.temp_buf, ctx.temp_len);
+    
+    client->output.len = header_len + ctx.temp_len;
 }
