@@ -707,7 +707,7 @@ int free_blob_callback(void *data, const unsigned char *key, uint32_t key_len, v
 
 void do_flush(client_t *client) {
     if (client->cmd.count != 1) {
-        const char *err = "-ERR wrong number of arguments for 'DBSIZE'\r\n";
+        const char *err = "-ERR wrong number of arguments for 'FLUSH'\r\n";
         memcpy(client->output.buf, err, strlen(err));
         client->output.len = strlen(err);
         return;
