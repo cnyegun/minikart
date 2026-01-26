@@ -102,6 +102,7 @@ void do_set(client_t *client);
 void do_get(client_t *client);
 void do_del(client_t *client);
 void do_dbsize(client_t *client);
+void do_flush(client_t *client);
 
 // IO & Parsing
 io_status_t sys_read(client_t *client);
@@ -303,6 +304,11 @@ void exec_cmd(client_t *client) {
 
     else if (cmd->len == 6 && strncasecmp(cmd->data, "DBSIZE", 6) == 0) {
         do_dbsize(client);
+        return;
+    }
+
+    else if (cmd->len == 5 && strncasecmp(cmd->data, "FLUSH", 5) == 0) {
+        do_flush(client);
         return;
     }
 
@@ -692,4 +698,24 @@ void do_dbsize(client_t *client) {
         return;
     }
     client->output.len = snprintf(client->output.buf, RESPONSE_BUFF_LEN, ":%ld\r\n", art_size(&g_keyspace));
+}
+
+int free_blob_callback(void *data, const unsigned char *key, uint32_t key_len, void *val) {
+    free(val);
+    return 0;
+}
+
+void do_flush(client_t *client) {
+    if (client->cmd.count != 1) {
+        const char *err = "-ERR wrong number of arguments for 'DBSIZE'\r\n";
+        memcpy(client->output.buf, err, strlen(err));
+        client->output.len = strlen(err);
+        return;
+    }
+    art_iter(&g_keyspace, &free_blob_callback, NULL);
+    art_tree_destroy(&g_keyspace);
+    art_tree_init(&g_keyspace);
+    const char *ok = "+OK\r\n";
+    memcpy(client->output.buf, ok, strlen(ok));
+    client->output.len = strlen(ok);
 }

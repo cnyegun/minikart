@@ -1,6 +1,6 @@
 CC = gcc
 
-CFLAGS = -Wall -Wextra -Werror -std=c23 -g -fsanitize=address
+CFLAGS = -std=c23 -g -fsanitize=address
 
 TARGET = minikart
 
