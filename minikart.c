@@ -286,10 +286,12 @@ void exec_cmd(client_t *client) {
 
     else if (cmd->len == 3 && strncasecmp(cmd->data, "SET", 3) == 0) {
         do_set(client);
+        return;
     }
 
     else if (cmd->len == 3 && strncasecmp(cmd->data, "GET", 3) == 0) {
         do_get(client);
+        return;
     }
 
     // Default: Unknown Command
@@ -602,7 +604,23 @@ void do_set(client_t *client) {
         client->output.len = strlen(err);
         return;
     }
-    (void)client;
+
+    blob_t *data_blob = blob_create(client->cmd.args[2]->data, client->cmd.args[2]->len);
+    
+    blob_t *old_blob = art_insert(
+        &g_keyspace, 
+        (const unsigned char *)client->cmd.args[1]->data, 
+        client->cmd.args[1]->len, 
+        data_blob
+    );
+
+    if (old_blob != NULL) {
+        free(old_blob);
+    }
+
+    const char *ok = "+OK\r\n";
+    memcpy(client->output.buf, ok, strlen(ok));
+    client->output.len = strlen(ok);
 }
 
 void do_get(client_t *client) {
@@ -612,5 +630,23 @@ void do_get(client_t *client) {
         client->output.len = strlen(err);
         return;
     }
-    (void)client;
+
+    blob_t *result = art_search(
+        &g_keyspace,
+        (const unsigned char *)client->cmd.args[1]->data,
+        client->cmd.args[1]->len
+    );
+
+    // Key not found
+    if (result == NULL) {
+        const char *err = "$-1\r\n";
+        memcpy(client->output.buf, err, strlen(err));
+        client->output.len = strlen(err);
+        return;
+    }
+
+    int header_len = snprintf(client->output.buf, RESPONSE_BUFF_LEN, "$%zu\r\n", result->len);
+    memcpy(client->output.buf + header_len, result->data, result->len);
+    memcpy(client->output.buf + header_len + result->len, "\r\n", 2);
+    client->output.len = header_len + result->len + 2;
 }
