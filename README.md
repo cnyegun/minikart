@@ -5,8 +5,9 @@ For something similar to redis, using subset of RESP.
 Under active construction.
 
 Todo:
-[] PING
-[] GET 
+[x] PING
+[x] GET 
+[x] SET
 [] DEL 
 [] EXPIRE
 [] HGET
