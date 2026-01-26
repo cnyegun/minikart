@@ -5,13 +5,13 @@ For something similar to redis, using subset of RESP.
 Under active construction.
 
 Todo:
-[x] PING
-[x] GET 
-[x] SET
-[] DEL 
-[] EXPIRE
-[] HGET
-[] HSET
-[] HGETALL
-[] LPUSH
-[] RPOP
+- [x] PING
+- [x] GET 
+- [x] SET
+- [] DEL 
+- [] EXPIRE
+- [] HGET
+- [] HSET
+- [] HGETALL
+- [] LPUSH
+- [] RPOP
