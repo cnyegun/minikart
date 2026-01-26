@@ -697,7 +697,7 @@ void do_dbsize(client_t *client) {
         client->output.len = strlen(err);
         return;
     }
-    client->output.len = snprintf(client->output.buf, RESPONSE_BUFF_LEN, ":%ld\r\n", art_size(&g_keyspace));
+    client->output.len = snprintf(client->output.buf, RESPONSE_BUFF_LEN, ":%lu\r\n", art_size(&g_keyspace));
 }
 
 int free_blob_callback(void *data, const unsigned char *key, uint32_t key_len, void *val) {
